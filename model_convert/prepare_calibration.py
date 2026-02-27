@@ -72,7 +72,6 @@ for image_path in image_paths:
         images_kwargs={"size": {"shortest_edge": processor.image_processor.min_pixels, "longest_edge": max_pixels}},
     ).to(device)
 
-    # import pdb; pdb.set_trace()
     print("inputs.pixel_values.shape:", inputs.pixel_values.shape)
     print("inputs.input_ids.shape:", inputs.input_ids.shape)
     print("inputs.image_grid_thw:", inputs.image_grid_thw)

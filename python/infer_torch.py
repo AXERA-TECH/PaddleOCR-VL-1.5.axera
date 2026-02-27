@@ -69,7 +69,6 @@ inputs = processor.apply_chat_template(
 print("inputs.pixel_values.shape:", inputs.pixel_values.shape)
 print("inputs.input_ids.shape:", inputs.input_ids.shape)
 print("inputs.image_grid_thw:", inputs.image_grid_thw)
-# import pdb; pdb.set_trace()
 
 outputs = model.generate(**inputs, max_new_tokens=1024)
 result = processor.decode(outputs[0][inputs["input_ids"].shape[-1]:-1])

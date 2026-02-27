@@ -59,15 +59,12 @@ $ cd PaddleOCR-VL-1.5.axera/python
 
 ### 1. PyTorch 参考推理
 
+> 可能需要配置运行环境, 请参考 `model_convert/README.md` 中的环境准备章节.
+
 ```bash
 cd python
-python3 infer_torch.py
+python infer_torch.py
 ```
-
-说明：
-
-- `infer_torch.py` 里有调试断点 `import pdb; pdb.set_trace()`.
-- 若不需要调试，请先手动注释该行，否则程序会停在 pdb 交互界面.
 
 ### 2. AxModel 推理
 
@@ -103,7 +100,7 @@ python3 infer_axmodel.py \
   --task ocr
 ```
 
-输入图像:
+输入下面的图像用于执行 OCR 任务:
 
 <img src="./assets/IMG_0462.JPG" alt="test-img" width="500" />
 
@@ -135,7 +132,7 @@ python3 gradio_demo.py \
   --vit_model ./vit_models/vit_576x768.axmodel
 ```
 
-结果展示如下:
+交互演示结果如下:
 
 ![gradio_demo](./assets/gradio_demo.png)
 
