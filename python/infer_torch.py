@@ -11,13 +11,13 @@ task = "ocr" # Options: 'ocr' | 'table' | 'chart' | 'formula' | 'spotting' | 'se
 
 # ---- Image Preprocessing For Spotting ----
 image = Image.open(image_path).convert("RGB")
+orig_w, orig_h = image.size
 
 # 导出 ONNX 需要固定图像尺寸
 # resize_h, resize_w = 768, 1024 # 1368, 1524
 resize_h, resize_w = 576, 768 # 1368, 1524, 最小尺寸为 336x336
 image = image.resize((resize_w, resize_h))
 
-orig_w, orig_h = image.size
 spotting_upscale_threshold = 1500
 
 if task == "spotting" and orig_w < spotting_upscale_threshold and orig_h < spotting_upscale_threshold:

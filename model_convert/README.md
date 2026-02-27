@@ -45,6 +45,8 @@ python export_onnx.py -m ../python/PaddleOCR-VL-1.5 -o ./vit-models
 说明:
 
 - 该导出脚本目前固定按 `576x768` 预处理路径对应的 token 排布导出.
+- 导出的 Vision ONNX 包含 `visual + projector`，输出应为 merge 后的视觉 token（`42x54/4=567`），而不是 `2268` 个 pre-projector 特征.
+- 导出脚本会在导出后自动做一次 ONNX 输出校验，若不包含 `567` token 输出会直接报错.
 - 若修改了输入分辨率，请同步核对 `prepare_calibration.py` 和推理脚本中的预处理逻辑.
 
 ## 2. 生成校准数据
@@ -126,5 +128,3 @@ pulsar2 llm_build --input_path PaddleOCR-VL-1.5 \
 ```
 
 当编译目标平台为 `AX650N` 时, 设置 `FLOAT_MATMUL_USE_CONV_EU=1` 环境变量可以大幅度提高模型 TTFT 时间 (AX620E 无效).
-
-

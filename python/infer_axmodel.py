@@ -4,16 +4,9 @@ import numpy as np
 import os
 from ml_dtypes import bfloat16
 from utils.infer_func import InferManager
+from utils.vision_output import describe_output_shapes, select_vit_output
 import argparse
 from PIL import Image
-import torch
-
-
-def _get_resample_filter():
-    try:
-        return Image.Resampling.LANCZOS
-    except AttributeError:
-        return Image.LANCZOS
 
 
 def _prepare_image(image_path, task):
@@ -23,107 +16,31 @@ def _prepare_image(image_path, task):
     resize_h, resize_w = 576, 768
     image = image.resize((resize_w, resize_h))
 
-    orig_w, orig_h = image.size
-    spotting_upscale_threshold = 1500
-    if task == "spotting" and orig_w < spotting_upscale_threshold and orig_h < spotting_upscale_threshold:
-        image = image.resize((orig_w * 2, orig_h * 2), _get_resample_filter())
-
+    # AX vision model is compiled with fixed 576x768 token layout.
+    # Keep spotting path aligned to avoid variable token counts.
     max_pixels = 2048 * 28 * 28 if task == "spotting" else 1280 * 28 * 28
     return image, max_pixels
 
 
-def _select_vit_output(outputs, target_hidden_size):
-    image_embeds = None
-    for output in outputs:
-        if output.ndim >= 2 and output.shape[-1] == target_hidden_size:
-            image_embeds = output
-            break
-    if image_embeds is None:
-        image_embeds = outputs[0]
-    if image_embeds.ndim == 2:
-        image_embeds = image_embeds[None, ...]
-    return image_embeds
-
-
-def _run_vit_onnx(session, pixel_values, target_hidden_size):
+def _run_vit_onnx(session, pixel_values, target_hidden_size, expected_tokens=None):
     outputs = session.run(None, {"pixel_values": pixel_values})
-    return _select_vit_output(outputs, target_hidden_size)
+    return (
+        select_vit_output(outputs, target_hidden_size, expected_tokens=expected_tokens),
+        describe_output_shapes(outputs),
+    )
 
 
-def _run_vit_axmodel(session, pixel_values, target_hidden_size):
+def _run_vit_axmodel(session, pixel_values, target_hidden_size, expected_tokens=None):
     outputs = session.run(None, {"pixel_values": pixel_values})
-    return _select_vit_output(outputs, target_hidden_size)
-
-
-def _expected_image_features(image_grid_thw):
-    return int(sum(int(t) * int(h) * int(w) for t, h, w in image_grid_thw))
+    return (
+        select_vit_output(outputs, target_hidden_size, expected_tokens=expected_tokens),
+        describe_output_shapes(outputs),
+    )
 
 
 def _expected_image_tokens(image_grid_thw, merge_size):
     merge_area = int(merge_size) * int(merge_size)
     return int(sum(int(t) * int(h) * int(w) // merge_area for t, h, w in image_grid_thw))
-
-
-class _Projector(torch.nn.Module):
-    def __init__(self, vision_hidden, text_hidden, merge_size):
-        super().__init__()
-        self.merge_size = int(merge_size)
-        self.pre_norm = torch.nn.LayerNorm(vision_hidden, eps=1e-5)
-        hidden_size = int(vision_hidden) * self.merge_size * self.merge_size
-        self.linear_1 = torch.nn.Linear(hidden_size, hidden_size, bias=True)
-        self.act = torch.nn.GELU()
-        self.linear_2 = torch.nn.Linear(hidden_size, int(text_hidden), bias=True)
-
-    def forward(self, image_features, image_grid_thw):
-        chunk_sizes = [int(t) * int(h) * int(w) for t, h, w in image_grid_thw]
-        image_features_chunks = torch.split(image_features, chunk_sizes, dim=0)
-
-        processed = []
-        for image_feature, grid in zip(image_features_chunks, image_grid_thw):
-            t, h, w = [int(v) for v in grid]
-            image_feature = self.pre_norm(image_feature)
-            d = image_feature.shape[-1]
-            h_block = h // self.merge_size
-            w_block = w // self.merge_size
-
-            image_feature = image_feature.reshape(t, h_block, self.merge_size, w_block, self.merge_size, d)
-            image_feature = image_feature.transpose(2, 3)
-            image_feature = image_feature.reshape(t * h_block * w_block, self.merge_size * self.merge_size * d)
-
-            hidden_states = self.linear_1(image_feature)
-            hidden_states = self.act(hidden_states)
-            hidden_states = self.linear_2(hidden_states)
-            processed.append(hidden_states)
-
-        return torch.cat(processed, dim=0)
-
-
-def _load_projector(hf_model_path, vision_hidden, text_hidden, merge_size):
-    try:
-        from safetensors.torch import load_file
-    except Exception:
-        return None
-
-    weight_path = os.path.join(hf_model_path, "model.safetensors")
-    if not os.path.exists(weight_path):
-        return None
-
-    state = load_file(weight_path, device="cpu")
-    prefixes = ["model.projector.", "projector.", "model.mlp_AR.", "mlp_AR."]
-    proj_state = {}
-    for prefix in prefixes:
-        proj_state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
-        if proj_state:
-            break
-    if not proj_state:
-        return None
-
-    projector = _Projector(vision_hidden, text_hidden, merge_size)
-    missing, unexpected = projector.load_state_dict(proj_state, strict=False)
-    if missing or unexpected:
-        return None
-    projector.eval()
-    return projector
 
 
 def _replace_image_tokens(token_ids, token_embeds, image_embeds, image_token_id):
@@ -215,7 +132,6 @@ if __name__ == "__main__":
     image_grid_thw = inputs.image_grid_thw.cpu().numpy().tolist()
     merge_size = config.vision_config.spatial_merge_size
     expected_tokens = _expected_image_tokens(image_grid_thw, merge_size)
-    expected_features = _expected_image_features(image_grid_thw)
 
     pixel_values = inputs.pixel_values
     if pixel_values.ndim == 4:
@@ -228,42 +144,42 @@ if __name__ == "__main__":
         except Exception as exc:
             raise ImportError("axengine is required for .axmodel inference") from exc
         vit_session = InferenceSession(args.vit_model_path)
-        image_embeds = _run_vit_axmodel(vit_session, pixel_values, target_hidden_size=config.hidden_size)
+        image_embeds, vit_output_shapes = _run_vit_axmodel(
+            vit_session,
+            pixel_values,
+            target_hidden_size=config.hidden_size,
+            expected_tokens=expected_tokens,
+        )
     else:
         providers = ["CPUExecutionProvider"]
         if "CUDAExecutionProvider" in ort.get_available_providers():
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
         vit_session = ort.InferenceSession(args.vit_model_path, providers=providers)
-        image_embeds = _run_vit_onnx(vit_session, pixel_values, target_hidden_size=config.hidden_size)
+        image_embeds, vit_output_shapes = _run_vit_onnx(
+            vit_session,
+            pixel_values,
+            target_hidden_size=config.hidden_size,
+            expected_tokens=expected_tokens,
+        )
 
     if image_embeds.ndim == 3:
         image_embeds = image_embeds[0]
     image_seq_len = image_embeds.shape[0]
-    if image_seq_len == expected_tokens:
-        projected_embeds = image_embeds
-    elif image_seq_len == expected_features:
-        projector = _load_projector(
-            hf_model_path,
-            vision_hidden=config.vision_config.hidden_size,
-            text_hidden=config.hidden_size,
-            merge_size=merge_size,
-        )
-        if projector is None:
+    if image_seq_len != expected_tokens:
+        expected_features = int(sum(int(t) * int(h) * int(w) for t, h, w in image_grid_thw))
+        if image_seq_len == expected_features:
             raise ValueError(
-                "Projector weights are unavailable. Use a vit axmodel/onnx that already outputs merged features "
-                f"(expected length {expected_tokens}), or provide projector weights in {hf_model_path}."
+                "Vision output is pre-projector features. "
+                f"got={image_seq_len}, expected_projected_tokens={expected_tokens}. "
+                "Please re-export VIT ONNX with projector included (model_convert/export_onnx.py), "
+                f"then re-compile to .axmodel. vit_output_shapes={vit_output_shapes}"
             )
-        with torch.no_grad():
-            projected = projector(
-                torch.from_numpy(image_embeds),
-                image_grid_thw,
-            )
-        projected_embeds = projected.cpu().numpy()
-    else:
         raise ValueError(
             "Unexpected image feature length. "
-            f"got={image_seq_len}, expected_tokens={expected_tokens}, expected_features={expected_features}"
+            f"got={image_seq_len}, expected_projected_tokens={expected_tokens}, "
+            f"expected_pre_projector_features={expected_features}, vit_output_shapes={vit_output_shapes}"
         )
+    projected_embeds = image_embeds
 
     prefill_data = np.take(embeds, token_ids, axis=0)
     prefill_data = _replace_image_tokens(
